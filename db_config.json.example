@@ -1,0 +1,7 @@
+{
+  "host": "localhost",
+  "database": "sterlingaiaml",
+  "user": "aml",
+  "password": "password",
+  "port": 5432
+}

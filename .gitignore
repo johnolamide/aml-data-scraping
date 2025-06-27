@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+demo*.py
+validate_project.py
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.csv
+!sample_opensanctions_output.csv
+*.log
+temp/
+output/
+test_*.py
+check_*.py
+
+# Temporary and test files
+test-*.csv
+*_test.csv
+sample_for_*.csv
+temp_*
+*.tmp
+*.temp
+*~
+*.backup
+*.bak
+
+# Database configuration
+db_config.json
+demo_db_config.json
+*_entities.csv
