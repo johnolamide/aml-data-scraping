@@ -19,7 +19,6 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-demo*.py
 validate_project.py
 
 # Virtual environments
@@ -42,8 +41,7 @@ Thumbs.db
 !sample_opensanctions_output.csv
 *.log
 temp/
-output/
-test_*.py
+output
 check_*.py
 
 # Temporary and test files
