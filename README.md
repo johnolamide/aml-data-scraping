@@ -272,20 +272,20 @@ pip install -r requirements.txt
 
 1. **Create database configuration file**:
 
-```bash
-cp db_config.json.example db_config.json
-# Edit db_config.json with your PostgreSQL credentials
-```
+    ```bash
+    cp db_config.json.example db_config.json
+    # Edit db_config.json with your PostgreSQL credentials
+    ```
 
 2. **Load CSV data to PostgreSQL**:
 
-```bash
-# Using config file
-python csv_to_postgresql.py --csv-file opensanctions_entities.csv --db-config db_config.json
+    ```bash
+    # Using config file
+    python csv_to_postgresql.py --csv-file opensanctions_entities.csv --db-config db_config.json
 
-# Using command line parameters
-python csv_to_postgresql.py --csv-file opensanctions_entities.csv --host localhost --database aml_db --user postgres --password secret
-```
+    # Using command line parameters
+    python csv_to_postgresql.py --csv-file opensanctions_entities.csv --host localhost --database aml_db --user postgres --password secret
+    ```
 
 #### Database Schema
 
