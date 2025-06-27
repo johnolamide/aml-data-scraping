@@ -30,27 +30,27 @@ pip install requests
 
 1. **Test with small datasets** (recommended first run):
 
-```bash
-python opensanctions_extractor.py --mode all --max-datasets 5 --output test_entities.csv
-```
+    ```bash
+    python opensanctions_extractor.py --mode all --max-datasets 5 --output test_entities.csv
+    ```
 
 2. **Extract specific datasets**:
 
-```bash
-python opensanctions_extractor.py --mode specific --datasets 'us_ofac_sdn,interpol_red_notices' --output specific_entities.csv
-```
+    ```bash
+    python opensanctions_extractor.py --mode specific --datasets 'us_ofac_sdn,interpol_red_notices' --output specific_entities.csv
+    ```
 
 3. **Extract all available datasets** (large download):
 
-```bash
-python opensanctions_extractor.py --mode all --output all_entities.csv
-```
+    ```bash
+    python opensanctions_extractor.py --mode all --output all_entities.csv
+    ```
 
 4. **Use consolidated data** (9+ GB file - most comprehensive):
 
-```bash
-python opensanctions_extractor.py --mode consolidated --output consolidated_entities.csv
-```
+    ```bash
+    python opensanctions_extractor.py --mode consolidated --output consolidated_entities.csv
+    ```
 
 ## Output Format
 
