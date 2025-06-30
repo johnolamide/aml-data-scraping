@@ -33,7 +33,7 @@ python csv_to_postgresql.py --csv-file entities_v2.csv --db-config config.json -
 
 ## 📊 Example Output
 
-```
+```bash
 2025-06-30 08:15:23,456 - INFO - Loading CSV file incrementally: entities_v2.csv
 2025-06-30 08:15:23,456 - INFO - CSV file size: 0.34 MB
 2025-06-30 08:15:23,456 - INFO - Fetching existing entity IDs from database...
@@ -50,7 +50,7 @@ python csv_to_postgresql.py --csv-file entities_v2.csv --db-config config.json -
 
 ## 🔧 Technical Implementation
 
-### Key Features:
+### Key Features
 
 1. **Efficient entity lookup**: Fetches all existing `entity_id` values into memory for fast comparison
 2. **Batch processing**: Still uses efficient batch inserts for new records
@@ -58,11 +58,11 @@ python csv_to_postgresql.py --csv-file entities_v2.csv --db-config config.json -
 4. **Error handling**: Continues processing even if individual records fail
 5. **Detailed logging**: Provides clear feedback on what was processed
 
-### Performance Characteristics:
+### Performance Characteristics
 
--   **Memory usage**: O(n) where n = number of existing entities in database
--   **Time complexity**: O(m + n) where m = CSV rows, n = existing entities
--   **Database queries**: 1 initial query to fetch existing IDs + batch inserts for new records
+- **Memory usage**: O(n) where n = number of existing entities in database
+- **Time complexity**: O(m + n) where m = CSV rows, n = existing entities
+- **Database queries**: 1 initial query to fetch existing IDs + batch inserts for new records
 
 ## ⚙️ Command Line Options
 
@@ -82,8 +82,8 @@ python demo_incremental.py
 
 This creates two CSV files:
 
--   `demo_initial.csv`: 100 entities (demo-entity-00001 to demo-entity-00100)
--   `demo_updated.csv`: 102 entities (adds demo-entity-00101 and demo-entity-00102)
+- `demo_initial.csv`: 100 entities (demo-entity-00001 to demo-entity-00100)
+- `demo_updated.csv`: 102 entities (adds demo-entity-00101 and demo-entity-00102)
 
 ## 🏆 Benefits
 

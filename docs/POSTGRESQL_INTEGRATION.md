@@ -28,25 +28,25 @@ The loader automatically derives PostgreSQL table names from CSV filenames:
 
 #### Full Load
 
--   Replaces all data in the table
--   Optional duplicate detection and skipping
--   Suitable for initial data loads or complete refreshes
+- Replaces all data in the table
+- Optional duplicate detection and skipping
+- Suitable for initial data loads or complete refreshes
 
 #### Incremental Load
 
--   Only adds new entities not already in database
--   Compares `entity_id` values to avoid duplicates
--   Ideal for regular updates with new data
--   Maintains data integrity and performance
+- Only adds new entities not already in database
+- Compares `entity_id` values to avoid duplicates
+- Ideal for regular updates with new data
+- Maintains data integrity and performance
 
 ### Schema Management
 
 The loader automatically creates tables with:
 
--   **Primary Key**: Auto-incrementing `id` column (SERIAL)
--   **Data Columns**: 23 standardized columns matching CSV output
--   **Metadata**: `created_at` and `updated_at` timestamps
--   **Performance Indexes**: Optimized indexes on frequently queried columns
+- **Primary Key**: Auto-incrementing `id` column (SERIAL)
+- **Data Columns**: 23 standardized columns matching CSV output
+- **Metadata**: `created_at` and `updated_at` timestamps
+- **Performance Indexes**: Optimized indexes on frequently queried columns
 
 ## Setup Instructions
 
@@ -62,11 +62,11 @@ Create a configuration file `db_config.json`:
 
 ```json
 {
-	"host": "localhost",
-	"database": "aml_database",
-	"user": "postgres",
-	"password": "your_password",
-	"port": 5432
+ "host": "localhost",
+ "database": "aml_database",
+ "user": "postgres",
+ "password": "your_password",
+ "port": 5432
 }
 ```
 
@@ -176,13 +176,13 @@ CREATE TABLE us_ofac_sanctions (
 
 The loader creates indexes for optimal query performance:
 
--   `idx_name` on `name` column
--   `idx_entity_id` on `entity_id` column
--   `idx_dataset` on `dataset` column
--   `idx_entity_type` on `entity_type` column
--   `idx_country` on `country` column
--   `idx_source` on `source` column
--   `idx_created_at` on `created_at` column
+- `idx_name` on `name` column
+- `idx_entity_id` on `entity_id` column
+- `idx_dataset` on `dataset` column
+- `idx_entity_type` on `entity_type` column
+- `idx_country` on `country` column
+- `idx_source` on `source` column
+- `idx_created_at` on `created_at` column
 
 ## Querying Data
 
@@ -220,15 +220,15 @@ ORDER BY count DESC;
 
 ### Large Datasets
 
--   Use `--batch-size` to tune memory usage (default: 1000)
--   Enable `--incremental` for regular updates
--   Monitor database connection limits during bulk loads
+- Use `--batch-size` to tune memory usage (default: 1000)
+- Enable `--incremental` for regular updates
+- Monitor database connection limits during bulk loads
 
 ### Incremental Updates
 
--   Incremental mode compares all existing `entity_id` values
--   For very large databases, consider partitioning strategies
--   Regular `VACUUM ANALYZE` recommended after bulk updates
+- Incremental mode compares all existing `entity_id` values
+- For very large databases, consider partitioning strategies
+- Regular `VACUUM ANALYZE` recommended after bulk updates
 
 ### Monitoring
 
@@ -251,9 +251,9 @@ python csv_to_postgresql.py \
 
 ### Error Recovery
 
--   Use `--drop-table` to restart failed loads
--   Check PostgreSQL logs for detailed error messages
--   Validate CSV format matches expected schema
+- Use `--drop-table` to restart failed loads
+- Check PostgreSQL logs for detailed error messages
+- Validate CSV format matches expected schema
 
 ## Integration Examples
 
