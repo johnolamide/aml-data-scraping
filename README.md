@@ -289,7 +289,13 @@ pip install -r requirements.txt
 
 #### Database Schema
 
-The PostgreSQL table `sterlingai-aml-ctf-pep-tbl` includes:
+The PostgreSQL table is automatically named based on the CSV filename:
+
+- **Dynamic Table Naming**: `us-ofac-sanctions.csv` → `us_ofac_sanctions` table
+- **Name Sanitization**: Special characters converted to underscores, lowercase
+- **Valid Identifiers**: Ensures PostgreSQL-compliant table names
+
+The table schema includes:
 
 - **`id`**: Auto-generated primary key (SERIAL)
 - **Standard columns**: All 23 standardized columns from the CSV output
@@ -299,8 +305,11 @@ The PostgreSQL table `sterlingai-aml-ctf-pep-tbl` includes:
 #### Usage Options
 
 ```bash
-# Drop existing table and reload
+# Drop existing table and reload (full replacement)
 python csv_to_postgresql.py --csv-file data.csv --db-config config.json --drop-table
+
+# Incremental loading (only add new entries - recommended for updates)
+python csv_to_postgresql.py --csv-file updated_data.csv --db-config config.json --incremental
 
 # Allow duplicate entity_ids
 python csv_to_postgresql.py --csv-file data.csv --db-config config.json --allow-duplicates
@@ -312,12 +321,31 @@ python csv_to_postgresql.py --csv-file data.csv --db-config config.json --batch-
 python csv_to_postgresql.py --csv-file data.csv --db-config config.json --verbose
 ```
 
+#### Incremental Updates
+
+The `--incremental` flag enables smart updating when your CSV file has new entries:
+
+```bash
+# First load: 100 entities
+python csv_to_postgresql.py --csv-file entities_v1.csv --db-config config.json --drop-table
+
+# Later: CSV updated with 102 entities (2 new ones)
+python csv_to_postgresql.py --csv-file entities_v2.csv --db-config config.json --incremental
+# Result: Only the 2 new entities are added to the database
+```
+
 #### Demo
 
 Run the PostgreSQL integration demo:
 
 ```bash
 python demo_postgresql.py
+```
+
+Run the incremental loading demo:
+
+```bash
+python demo_incremental.py
 ```
 
 This demo will:
@@ -334,6 +362,7 @@ opensanctions-extractor/
 ├── csv_to_postgresql.py          # PostgreSQL database loader
 ├── demo_opensanctions.py         # Extraction demonstration
 ├── demo_postgresql.py            # Database integration demo
+├── demo_incremental.py           # Incremental loading demo
 ├── test_opensanctions.py         # Test and validation script
 ├── requirements.txt              # Python dependencies
 ├── db_config.json.example        # Database configuration template
