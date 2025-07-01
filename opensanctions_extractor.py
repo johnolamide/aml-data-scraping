@@ -42,13 +42,9 @@ class OpenSanctionsExtractor:
         # Configure session for better SSL handling
         self._configure_session()
 
-        # Define CSV output columns
-        self.csv_columns = [
-            'name', 'source', 'dataset', 'dataset_title', 'entity_type', 'entity_id',
-            'alias', 'country', 'birth_date', 'nationality', 'position', 'registration_number',
-            'topics', 'sanction_program', 'description', 'last_updated', 'source_url',
-            'legal_form', 'incorporation_date', 'address', 'phone', 'email', 'website'
-        ]
+        # Dynamic CSV columns - will be determined from actual data
+        self.csv_columns = set()  # Use set to collect unique columns
+        self.all_entities = []  # Store all entities to analyze schema later
 
     def _configure_session(self):
         """Configure the requests session for better SSL handling"""
@@ -512,32 +508,26 @@ class OpenSanctionsExtractor:
                 pass
 
     def _create_entity_from_csv_row(self, row: Dict, dataset: Dict) -> Dict:
-        """Create standardized entity dict from CSV row"""
-        return {
-            'name': row.get('name', '').strip(),
-            'source': 'opensanctions',
-            'dataset': dataset.get('name', ''),
-            'dataset_title': dataset.get('title', ''),
-            'entity_type': row.get('schema', ''),
-            'entity_id': row.get('id', ''),
-            'alias': self._extract_aliases_from_csv(row),
-            'country': row.get('country', ''),
-            'birth_date': row.get('birth_date', ''),
-            'nationality': row.get('nationality', ''),
-            'position': row.get('position', ''),
-            'registration_number': row.get('registration_number', ''),
-            'topics': row.get('topics', ''),
-            'sanction_program': row.get('program', ''),
-            'description': row.get('description', '').strip(),
-            'last_updated': dataset.get('updated_at', ''),
-            'source_url': row.get('source_url', ''),
-            'legal_form': row.get('legal_form', ''),
-            'incorporation_date': row.get('incorporation_date', ''),
-            'address': row.get('address', ''),
-            'phone': row.get('phone', ''),
-            'email': row.get('email', ''),
-            'website': row.get('website', '')
-        }
+        """Create entity dict from CSV row using actual available columns"""
+        entity = {}
+
+        # Always include core metadata
+        entity['source'] = 'opensanctions'
+        entity['dataset'] = dataset.get('name', '')
+        entity['dataset_title'] = dataset.get('title', '')
+        entity['last_updated'] = dataset.get('updated_at', '')
+
+        # Add all available columns from the CSV row
+        for key, value in row.items():
+            if key and value and str(value).strip():  # Only non-empty values
+                # Clean the column name
+                clean_key = key.strip().lower().replace(' ', '_').replace('-', '_')
+                entity[clean_key] = str(value).strip()
+
+        # Track all columns we've seen
+        self.csv_columns.update(entity.keys()) # type: ignore
+
+        return entity
 
     def _extract_aliases_from_csv(self, row: Dict) -> str:
         """Extract aliases from CSV row (may have multiple alias columns)"""
@@ -788,9 +778,15 @@ class OpenSanctionsExtractor:
             return []
 
     def save_to_csv(self, all_entities: List[Dict]):
-        """Save all entities to CSV file"""
+        """Save all entities to CSV file with dynamic schema"""
+        # First, analyze the data to determine the best schema
+        self.all_entities = all_entities
+        self.analyze_and_finalize_schema()
+
         logger.info(
             f"Saving {len(all_entities)} entities to {self.output_file}")
+        logger.info(
+            f"Using dynamic schema with {len(self.csv_columns)} columns")
 
         try:
             with open(self.output_file, 'w', newline='', encoding='utf-8') as csvfile:
@@ -798,7 +794,7 @@ class OpenSanctionsExtractor:
                 writer.writeheader()
 
                 for entity in all_entities:
-                    # Ensure all required columns exist
+                    # Create row with all columns, filling missing ones with empty string
                     clean_entity = {}
                     for col in self.csv_columns:
                         clean_entity[col] = entity.get(col, '')
@@ -810,11 +806,7 @@ class OpenSanctionsExtractor:
             logger.error(f"Failed to save CSV: {e}")
             raise
 
-    # type: ignore
-    # type: ignore
-    # type: ignore
-    # type: ignore
-    # type: ignore
+
     def run_extraction(self, mode: str, specific_datasets: Optional[List[str]] = None, max_datasets: Optional[int] = None):
         """Main extraction process"""
         start_time = time.time()
@@ -1043,6 +1035,74 @@ class OpenSanctionsExtractor:
         except Exception as e:
             logger.error(f"Failed to extract compressed file {file_path}: {e}")
             return None
+
+    def _create_entity_from_ftm_json(self, ftm_entity: Dict, dataset: Dict) -> Dict:
+        """Create entity dict from FTM JSON using actual available properties"""
+        entity = {}
+
+        # Always include core metadata
+        entity['source'] = 'opensanctions'
+        entity['dataset'] = dataset.get('name', '')
+        entity['dataset_title'] = dataset.get('title', '')
+        entity['last_updated'] = dataset.get('updated_at', '')
+        entity['entity_id'] = ftm_entity.get('id', '')
+        entity['entity_type'] = ftm_entity.get('schema', '')
+
+        # Process all available properties
+        properties = ftm_entity.get('properties', {})
+        for prop_name, prop_values in properties.items():
+            if prop_values:  # Only non-empty values
+                # Join multiple values with semicolon
+                if isinstance(prop_values, list):
+                    clean_value = '; '.join(str(v).strip()
+                                            for v in prop_values if str(v).strip())
+                else:
+                    clean_value = str(prop_values).strip()
+
+                if clean_value:
+                    # Clean the property name
+                    clean_key = prop_name.strip().lower().replace(' ', '_').replace('-', '_')
+                    entity[clean_key] = clean_value
+
+        # Track all columns we've seen
+        self.csv_columns.update(entity.keys()) # type: ignore
+
+        return entity
+
+    def analyze_and_finalize_schema(self):
+        """Analyze collected data and finalize the CSV schema"""
+        logger.info(
+            f"Analyzing schema from {len(self.all_entities)} entities...")
+
+        # Count column usage to prioritize common columns
+        column_counts = {}
+        for entity in self.all_entities:
+            for column in entity.keys():
+                column_counts[column] = column_counts.get(column, 0) + 1
+
+        # Sort columns by usage frequency and importance
+        core_columns = ['source', 'dataset', 'dataset_title',
+                        'name', 'entity_id', 'entity_type']
+        other_columns = [col for col in column_counts.keys()
+                         if col not in core_columns]
+        other_columns.sort(key=lambda x: column_counts[x], reverse=True)
+
+        # Final column order: core columns first, then others by frequency
+        self.csv_columns = []
+        for col in core_columns:
+            if col in column_counts:
+                self.csv_columns.append(col)
+
+        self.csv_columns.extend(other_columns)
+
+        logger.info(f"Finalized schema with {len(self.csv_columns)} columns:")
+        for i, col in enumerate(self.csv_columns[:10]):  # Show first 10
+            count = column_counts.get(col, 0)
+            logger.info(
+                f"  {i+1}. {col}: {count:,} entities ({count/len(self.all_entities)*100:.1f}%)")
+
+        if len(self.csv_columns) > 10:
+            logger.info(f"  ... and {len(self.csv_columns) - 10} more columns")
 
 
 def main():
