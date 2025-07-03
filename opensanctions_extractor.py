@@ -22,6 +22,13 @@ from typing import Dict, List, Any, Optional
 import time
 import ssl
 import urllib3
+import tempfile
+import os
+import subprocess
+import zipfile
+import gzip
+import bz2
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -45,6 +52,46 @@ class OpenSanctionsExtractor:
         # Dynamic CSV columns - will be determined from actual data
         self.csv_columns = set()  # Use set to collect unique columns
         self.all_entities = []  # Store all entities to analyze schema later
+
+        # Column mapping for ID standardization
+        self.id_column_mappings = {
+            'id': 'entity_id',
+            'entityid': 'entity_id',
+            'entity_id': 'entity_id',  # Keep as is
+            'record_id': 'entity_id',
+            'recordid': 'entity_id',
+            'uid': 'entity_id',
+            'uuid': 'entity_id',
+            'identifier': 'entity_id',
+            'person_id': 'entity_id',
+            'personid': 'entity_id',
+            'individual_id': 'entity_id',
+            'individualid': 'entity_id',
+            'subject_id': 'entity_id',
+            'subjectid': 'entity_id',
+            'target_id': 'entity_id',
+            'targetid': 'entity_id'
+        }
+
+    def _normalize_column_name(self, column_name: str) -> str:
+        """Normalize column names and map ID columns to entity_id"""
+        if not column_name:
+            return column_name
+
+        # Clean the column name first
+        clean_name = column_name.strip().lower().replace(' ', '_').replace('-', '_')
+        clean_name = re.sub(r'[^a-z0-9_]', '_', clean_name)
+        clean_name = re.sub(r'_+', '_', clean_name).strip('_')
+
+        # Check if this is an ID column that should be mapped to entity_id
+        if clean_name in self.id_column_mappings:
+            mapped_name = self.id_column_mappings[clean_name]
+            if clean_name != mapped_name:
+                logger.debug(
+                    f"Mapping column '{column_name}' -> '{mapped_name}'")
+            return mapped_name
+
+        return clean_name
 
     def _configure_session(self):
         """Configure the requests session for better SSL handling"""
@@ -70,10 +117,6 @@ class OpenSanctionsExtractor:
                 ctx1.set_ciphers('DEFAULT@SECLEVEL=1')
                 ctx1.check_hostname = False
                 ctx1.verify_mode = ssl.CERT_NONE
-                # Enable legacy protocols if available
-                ctx1.options &= ~ssl.OP_NO_SSLv3
-                ctx1.options &= ~ssl.OP_NO_TLSv1
-                ctx1.options &= ~ssl.OP_NO_TLSv1_1
                 ssl_contexts.append(("permissive_legacy", ctx1))
             except:
                 pass
@@ -141,8 +184,6 @@ class OpenSanctionsExtractor:
 
     def _make_request(self, url: str, timeout: int = 60, max_retries: int = 3, stream: bool = False):
         """Make HTTP request with retry logic and better error handling"""
-        import time
-
         last_exception = None
 
         for attempt in range(max_retries):
@@ -215,6 +256,102 @@ class OpenSanctionsExtractor:
             raise requests.exceptions.RequestException(
                 f"Failed to fetch {url} after {max_retries} attempts")
 
+    def _make_request_with_fallback(self, url: str, timeout: int = 60, max_retries: int = 3, stream: bool = False):
+        """Make HTTP request with curl fallback for SSL issues"""
+        try:
+            # First try the normal request method
+            return self._make_request(url, timeout, max_retries, stream)
+        except requests.exceptions.SSLError as e:
+            logger.warning(
+                f"All Python request methods failed with SSL error: {e}")
+            logger.info("Attempting curl fallback...")
+
+            # Try curl fallback
+            temp_file = self._fallback_curl_request(url)
+            if temp_file:
+                # Create a mock response object
+                class MockResponse:
+                    def __init__(self, file_path):
+                        self.file_path = file_path
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            self.text = f.read()
+                        self.status_code = 200
+
+                    def json(self):
+                        import json
+                        return json.loads(self.text)
+
+                    def raise_for_status(self):
+                        pass
+
+                    def iter_lines(self, decode_unicode=True):
+                        return self.text.splitlines()
+
+                return MockResponse(temp_file)
+            else:
+                raise e
+        except Exception as e:
+            # For non-SSL errors, just re-raise
+            raise e
+
+    def _fallback_curl_request(self, url: str, output_file: Optional[str] = None) -> Optional[str]:
+        """Fallback method using curl when Python requests fail due to SSL issues"""
+        try:
+            logger.info(
+                f"Attempting to download {url} using curl as fallback...")
+
+            if output_file is None:
+                # Determine appropriate file extension from URL
+                url_lower = url.lower()
+                if '.zip' in url_lower:
+                    output_file = tempfile.mktemp(suffix='.zip')
+                elif '.gz' in url_lower:
+                    output_file = tempfile.mktemp(suffix='.gz')
+                elif '.bz2' in url_lower:
+                    output_file = tempfile.mktemp(suffix='.bz2')
+                else:
+                    output_file = tempfile.mktemp(suffix='.csv')
+
+            # Check if curl is available
+            if not shutil.which('curl'):
+                logger.warning("Curl is not available on this system")
+                return None
+
+            # Use curl with SSL options that are more permissive
+            curl_cmd = [
+                'curl',
+                '-L',  # Follow redirects
+                '--retry', '3',  # Retry on failure
+                '--retry-delay', '2',  # Delay between retries
+                '--connect-timeout', '30',  # Connection timeout
+                '--max-time', '300',  # Max total time
+                '--insecure',  # Ignore SSL certificate errors
+                '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+                '--compressed',  # Handle compressed responses
+                '-o', output_file,  # Output to file
+                url
+            ]
+
+            result = subprocess.run(
+                curl_cmd, capture_output=False, text=True, timeout=320)
+
+            if result.returncode == 0 and os.path.exists(output_file):
+                file_size = os.path.getsize(output_file)
+                logger.info(
+                    f"Successfully downloaded using curl ({file_size:,} bytes)")
+                return output_file
+            else:
+                logger.error(
+                    f"Curl failed with return code {result.returncode}")
+                return None
+
+        except subprocess.TimeoutExpired:
+            logger.error("Curl command timed out")
+            return None
+        except Exception as e:
+            logger.error(f"Fallback curl method failed: {e}")
+            return None
+
     def fetch_datasets_index(self) -> Dict:
         """Fetch the main datasets index"""
         logger.info("Fetching OpenSanctions datasets index...")
@@ -226,11 +363,6 @@ class OpenSanctionsExtractor:
             logger.error(f"Failed to fetch datasets index: {e}")
             raise
 
-    # type: ignore
-    # type: ignore
-    # type: ignore
-    # type: ignore
-    # type: ignore
     def get_target_datasets(self, mode: str, specific_datasets: Optional[List[str]] = None) -> List[Dict]:
         """Get list of datasets to process based on mode"""
         index_data = self.fetch_datasets_index()
@@ -281,16 +413,14 @@ class OpenSanctionsExtractor:
         entities = []
 
         try:
-            # Check if this is a large dataset that needs special handling
-            dataset_name = dataset.get('name', '')
+            # Check dataset size
             target_count = dataset.get('target_count', 0)
 
-            # Use robust download for large datasets
             if target_count > 50000:
                 logger.info(
                     f"Large dataset detected ({target_count:,} entities), using robust download...")
 
-                # Try robust download method first
+                # Download large file
                 downloaded_file = self._download_large_file(
                     csv_url, timeout=300)
                 if downloaded_file:
@@ -299,18 +429,17 @@ class OpenSanctionsExtractor:
                     logger.error("All download methods failed for large file")
                     return []
             else:
-                # For smaller datasets, use the regular streaming method
-                timeout = 60
+                # For smaller datasets, use regular method
                 response = self._make_request_with_fallback(
-                    csv_url, timeout=timeout, stream=False)
+                    csv_url, timeout=60, stream=False)
 
-                # Parse CSV content normally
+                # Parse CSV content
                 csv_content = response.text
                 csv_reader = csv.DictReader(csv_content.splitlines())
 
                 for row in csv_reader:
                     entity = self._create_entity_from_csv_row(row, dataset)
-                    if entity['name']:
+                    if entity.get('name'):
                         entities.append(entity)
 
             logger.info(f"Extracted {len(entities)} entities from CSV")
@@ -321,23 +450,11 @@ class OpenSanctionsExtractor:
             return []
 
     def _download_large_file(self, url: str, timeout: int = 300) -> Optional[str]:
-        """Download large files with robust error handling and SSL fallback"""
-        import tempfile
-        import shutil
-        import os
+        """Download large files with robust error handling"""
+        # Create temporary file
+        temp_file = tempfile.mktemp(suffix='.csv')
 
-        # Determine file extension from URL
-        url_lower = url.lower()
-        if '.zip' in url_lower:
-            temp_file = tempfile.mktemp(suffix='.zip')
-        elif '.gz' in url_lower:
-            temp_file = tempfile.mktemp(suffix='.gz')
-        elif '.bz2' in url_lower:
-            temp_file = tempfile.mktemp(suffix='.bz2')
-        else:
-            temp_file = tempfile.mktemp(suffix='.csv')
-
-        # Try multiple approaches for downloading large files
+        # Try multiple download methods
         methods = [
             ("requests_stream", self._download_with_requests_stream),
             ("requests_raw", self._download_with_requests_raw),
@@ -348,6 +465,7 @@ class OpenSanctionsExtractor:
             try:
                 logger.info(
                     f"Attempting large file download using {method_name}...")
+
                 if method_func(url, temp_file, timeout):
                     logger.info(
                         f"Successfully downloaded large file using {method_name}")
@@ -355,7 +473,7 @@ class OpenSanctionsExtractor:
                     # Check if file needs extraction
                     extracted_file = self._extract_if_compressed(temp_file)
                     if extracted_file:
-                        # Clean up original compressed file
+                        # Clean up original file
                         if os.path.exists(temp_file) and temp_file != extracted_file:
                             os.remove(temp_file)
                         return extracted_file
@@ -363,6 +481,7 @@ class OpenSanctionsExtractor:
                         return temp_file
                 else:
                     logger.warning(f"Method {method_name} failed")
+
             except Exception as e:
                 logger.warning(f"Method {method_name} failed with error: {e}")
                 continue
@@ -373,177 +492,253 @@ class OpenSanctionsExtractor:
         return None
 
     def _download_with_requests_stream(self, url: str, destination: str, timeout: int) -> bool:
-        """Download using requests with stream=True and shutil.copyfileobj"""
+        """Download using requests with stream=True"""
         try:
             response = self.session.get(url, stream=True, timeout=timeout)
-            response.raise_for_status()
-
-            with open(destination, 'wb') as out_file:
-                # Use shutil.copyfileobj for efficient streaming
-                shutil.copyfileobj(response.raw, out_file)
-            return True
-        except Exception as e:
-            logger.debug(f"Requests stream method failed: {e}")
-            return False
-
-    def _download_with_requests_raw(self, url: str, destination: str, timeout: int) -> bool:
-        """Download using requests with manual chunking and SSL disabled"""
-        try:
-            # Use a fresh session with SSL disabled for problematic endpoints
-            session = requests.Session()
-            session.verify = False
-            session.headers.update(self.session.headers)
-
-            response = session.get(url, stream=True, timeout=timeout)
             response.raise_for_status()
 
             with open(destination, 'wb') as out_file:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         out_file.write(chunk)
-            return True
+
+            # Verify file was downloaded
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                logger.info(
+                    f"Downloaded {os.path.getsize(destination)} bytes to {destination}")
+                return True
+            else:
+                logger.error("Downloaded file is empty or doesn't exist")
+                return False
+
+        except Exception as e:
+            logger.debug(f"Requests stream method failed: {e}")
+            return False
+
+    def _download_with_requests_raw(self, url: str, destination: str, timeout: int) -> bool:
+        """Download using requests raw response"""
+        try:
+            response = self.session.get(url, stream=True, timeout=timeout)
+            response.raise_for_status()
+
+            with open(destination, 'wb') as out_file:
+                shutil.copyfileobj(response.raw, out_file)
+
+            # Verify file was downloaded
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                logger.info(
+                    f"Downloaded {os.path.getsize(destination)} bytes to {destination}")
+                return True
+            else:
+                logger.error("Downloaded file is empty or doesn't exist")
+                return False
+
         except Exception as e:
             logger.debug(f"Requests raw method failed: {e}")
             return False
 
     def _download_with_curl(self, url: str, destination: str, timeout: int) -> bool:
-        """Download using curl as ultimate fallback"""
-        return self._fallback_curl_request(url, destination) is not None
+        """Download using curl command"""
+        try:
+            if not shutil.which('curl'):
+                logger.debug("Curl is not available")
+                return False
 
-    def _process_streaming_csv(self, response, dataset: Dict) -> List[Dict]:
-        """Process large CSV files using streaming to avoid memory issues"""
-        entities = []
-        header_read = False
-        headers = []
+            curl_cmd = [
+                'curl',
+                '-L',  # Follow redirects
+                '--retry', '3',
+                '--retry-delay', '2',
+                '--connect-timeout', '30',
+                '--max-time', str(timeout),
+                '--insecure',
+                '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+                '--compressed',
+                '-o', destination,
+                url
+            ]
 
-        logger.info("Processing large CSV file with streaming...")
+            result = subprocess.run(
+                curl_cmd, capture_output=True, text=True, timeout=timeout + 20)
 
-        # Read the response line by line
-        for line_num, line in enumerate(response.iter_lines(decode_unicode=True)):
-            if line_num % 50000 == 0 and line_num > 0:
+            if result.returncode == 0 and os.path.exists(destination) and os.path.getsize(destination) > 0:
                 logger.info(
-                    f"Processed {line_num:,} lines, extracted {len(entities):,} entities...")
+                    f"Downloaded {os.path.getsize(destination)} bytes using curl")
+                return True
+            else:
+                logger.debug(
+                    f"Curl failed with return code {result.returncode}")
+                return False
 
-            if not line.strip():
-                continue
-
-            if not header_read:
-                # First line contains headers
-                headers = [h.strip('"') for h in line.split(',')]
-                header_read = True
-                continue
-
-            try:
-                # Parse CSV line manually
-                values = [v.strip('"') for v in line.split(',')]
-                if len(values) != len(headers):
-                    continue  # Skip malformed lines
-
-                row = dict(zip(headers, values))
-                entity = self._create_entity_from_csv_row(row, dataset)
-
-                if entity['name']:
-                    entities.append(entity)
-
-            except Exception as e:
-                # Skip problematic lines
-                logger.debug(f"Skipping line {line_num}: {e}")
-                continue
-
-        return entities
+        except Exception as e:
+            logger.debug(f"Curl method failed: {e}")
+            return False
 
     def _process_downloaded_csv_file(self, file_path: str, dataset: Dict) -> List[Dict]:
         """Process a downloaded CSV file"""
         entities = []
-
         logger.info(f"Processing downloaded CSV file: {file_path}")
 
         try:
-            # File should already be extracted as plain CSV at this point
-            with open(file_path, 'r', encoding='utf-8', newline='') as csvfile:
-                csv_reader = csv.DictReader(csvfile)
+            # Check if file is compressed or has issues
+            with open(file_path, 'rb') as f:
+                first_bytes = f.read(100)
 
-                for line_num, row in enumerate(csv_reader):
-                    if line_num % 50000 == 0 and line_num > 0:
-                        logger.info(
-                            f"Processed {line_num:,} lines, extracted {len(entities):,} entities...")
+            # Handle null bytes
+            if b'\x00' in first_bytes:
+                logger.warning("File contains null bytes, cleaning...")
+                cleaned_file = self._clean_null_bytes_from_file(file_path)
+                if cleaned_file:
+                    return self._process_downloaded_csv_file(cleaned_file, dataset)
+                else:
+                    logger.error("Failed to clean file")
+                    return []
 
-                    entity = self._create_entity_from_csv_row(row, dataset)
-                    if entity['name']:
-                        entities.append(entity)
+            # Process with multiple encodings
+            return self._process_csv_file_with_encoding(file_path, dataset)
 
-            logger.info(
-                f"Successfully processed {len(entities)} entities from downloaded file")
-            return entities
-
-        except UnicodeDecodeError:
-            # Try different encodings if UTF-8 fails
-            logger.warning("UTF-8 decoding failed, trying latin-1...")
-            try:
-                with open(file_path, 'r', encoding='latin-1', newline='') as csvfile:
-                    csv_reader = csv.DictReader(csvfile)
-                    for line_num, row in enumerate(csv_reader):
-                        if line_num % 50000 == 0 and line_num > 0:
-                            logger.info(
-                                f"Processed {line_num:,} lines, extracted {len(entities):,} entities...")
-                        entity = self._create_entity_from_csv_row(row, dataset)
-                        if entity['name']:
-                            entities.append(entity)
-                logger.info(
-                    f"Successfully processed {len(entities)} entities with latin-1 encoding")
-                return entities
-            except Exception as e2:
-                logger.error(f"Failed with latin-1 encoding too: {e2}")
-                return []
         except Exception as e:
             logger.error(f"Failed to process downloaded CSV file: {e}")
             return []
         finally:
-            # Clean up the temporary file
+            # Clean up temporary file
             try:
-                import os
                 if os.path.exists(file_path):
                     os.remove(file_path)
             except:
                 pass
 
-    def _create_entity_from_csv_row(self, row: Dict, dataset: Dict) -> Dict:
-        """Create entity dict from CSV row using actual available columns"""
-        entity = {}
+    def _clean_null_bytes_from_file(self, file_path: str) -> Optional[str]:
+        """Clean null bytes from a file"""
+        try:
+            cleaned_file = tempfile.mktemp(suffix='.csv')
 
-        # Always include core metadata
-        entity['source'] = 'opensanctions'
-        entity['dataset'] = dataset.get('name', '')
-        entity['dataset_title'] = dataset.get('title', '')
-        entity['last_updated'] = dataset.get('updated_at', '')
+            with open(file_path, 'rb') as infile, open(cleaned_file, 'wb') as outfile:
+                while True:
+                    chunk = infile.read(8192)
+                    if not chunk:
+                        break
+                    # Remove null bytes
+                    cleaned_chunk = chunk.replace(b'\x00', b'')
+                    outfile.write(cleaned_chunk)
 
-        # Add all available columns from the CSV row
-        for key, value in row.items():
-            if key and value and str(value).strip():  # Only non-empty values
-                # Clean the column name
-                clean_key = key.strip().lower().replace(' ', '_').replace('-', '_')
-                entity[clean_key] = str(value).strip()
+            # Check if cleaned file has content
+            if os.path.getsize(cleaned_file) > 0:
+                logger.info(
+                    f"Successfully cleaned file, size: {os.path.getsize(cleaned_file)} bytes")
+                return cleaned_file
+            else:
+                os.remove(cleaned_file)
+                return None
 
-        # Track all columns we've seen
-        self.csv_columns.update(entity.keys()) # type: ignore
+        except Exception as e:
+            logger.error(f"Failed to clean null bytes: {e}")
+            return None
 
-        return entity
+    def _process_csv_file_with_encoding(self, file_path: str, dataset: Dict) -> List[Dict]:
+        """Process CSV file trying multiple encodings"""
+        entities = []
+        encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
 
-    def _extract_aliases_from_csv(self, row: Dict) -> str:
-        """Extract aliases from CSV row (may have multiple alias columns)"""
-        aliases = []
+        for encoding in encodings:
+            try:
+                logger.info(f"Trying {encoding} encoding...")
 
-        # Check for main alias field
-        if row.get('alias'):
-            aliases.append(row['alias'])
+                with open(file_path, 'r', encoding=encoding, newline='', errors='ignore') as csvfile:
+                    csv_reader = csv.DictReader(csvfile)
 
-        # Check for numbered alias fields (alias_1, alias_2, etc.)
-        for i in range(1, 10):  # Check up to alias_9
-            alias_field = f'alias_{i}'
-            if row.get(alias_field):
-                aliases.append(row[alias_field])
+                    # Check if we can read the header
+                    if not csv_reader.fieldnames:
+                        logger.warning(
+                            f"No headers found with {encoding} encoding")
+                        continue
 
-        return '; '.join(filter(None, aliases))
+                    entities = []
+                    for line_num, row in enumerate(csv_reader):
+                        if line_num % 50000 == 0 and line_num > 0:
+                            logger.info(
+                                f"Processed {line_num:,} lines, extracted {len(entities):,} entities...")
+
+                        entity = self._create_entity_from_csv_row(row, dataset)
+                        if entity.get('name'):
+                            entities.append(entity)
+
+                logger.info(
+                    f"Successfully processed {len(entities)} entities with {encoding} encoding")
+                return entities
+
+            except UnicodeDecodeError as e:
+                logger.warning(f"Failed with {encoding} encoding: {e}")
+                continue
+            except Exception as e:
+                logger.warning(f"Error with {encoding} encoding: {e}")
+                continue
+
+        logger.error("Failed to process file with any encoding")
+        return []
+
+    def _extract_if_compressed(self, file_path: str) -> Optional[str]:
+        """Extract compressed files and return path to extracted CSV"""
+        try:
+            file_lower = file_path.lower()
+
+            # Handle ZIP files
+            if file_lower.endswith('.zip'):
+                logger.info("Extracting ZIP archive...")
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    # Look for CSV files in the archive
+                    csv_files = [f for f in zip_ref.namelist(
+                    ) if f.lower().endswith('.csv')]
+                    if not csv_files:
+                        logger.warning("No CSV files found in ZIP archive")
+                        return None
+
+                    # Extract the first CSV file (or largest if multiple)
+                    target_file = csv_files[0]
+                    if len(csv_files) > 1:
+                        # Choose the largest CSV file
+                        file_sizes = [(f, zip_ref.getinfo(f).file_size)
+                                      for f in csv_files]
+                        target_file = max(file_sizes, key=lambda x: x[1])[0]
+                        logger.info(
+                            f"Multiple CSV files found, extracting largest: {target_file}")
+
+                    # Extract to temporary location
+                    extracted_path = tempfile.mktemp(suffix='.csv')
+                    with zip_ref.open(target_file) as source, open(extracted_path, 'wb') as target:
+                        shutil.copyfileobj(source, target)
+
+                    logger.info(
+                        f"Successfully extracted {target_file} from ZIP")
+                    return extracted_path
+
+            # Handle GZIP files
+            elif file_lower.endswith('.gz'):
+                logger.info("Extracting GZIP archive...")
+                extracted_path = tempfile.mktemp(suffix='.csv')
+                with gzip.open(file_path, 'rb') as gz_file:
+                    with open(extracted_path, 'wb') as out_file:
+                        shutil.copyfileobj(gz_file, out_file)
+                logger.info("Successfully extracted GZIP file")
+                return extracted_path
+
+            # Handle BZIP2 files
+            elif file_lower.endswith('.bz2'):
+                logger.info("Extracting BZIP2 archive...")
+                extracted_path = tempfile.mktemp(suffix='.csv')
+                with bz2.open(file_path, 'rb') as bz2_file:
+                    with open(extracted_path, 'wb') as out_file:
+                        shutil.copyfileobj(bz2_file, out_file)
+                logger.info("Successfully extracted BZIP2 file")
+                return extracted_path
+
+            # Not a compressed file, return as-is
+            else:
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to extract compressed file {file_path}: {e}")
+            return None
 
     def extract_from_ftm_json(self, dataset: Dict, json_url: str) -> List[Dict]:
         """Extract entities from entities.ftm.json format"""
@@ -560,53 +755,9 @@ class OpenSanctionsExtractor:
 
                 try:
                     ftm_entity = json.loads(line)
-                    properties = ftm_entity.get('properties', {})
-
-                    # Extract name (can be multiple)
-                    names = properties.get('name', [])
-                    if not names:
-                        continue
-
-                    primary_name = names[0] if names else ''
-                    aliases = '; '.join(names[1:]) if len(names) > 1 else ''
-
-                    # Add other aliases
-                    other_aliases = []
-                    for alias_field in ['alias', 'previousName', 'weakAlias']:
-                        if alias_field in properties:
-                            other_aliases.extend(properties[alias_field])
-
-                    if other_aliases:
-                        aliases = '; '.join(
-                            [aliases] + other_aliases) if aliases else '; '.join(other_aliases)
-
-                    entity = {
-                        'name': primary_name,
-                        'source': 'opensanctions',
-                        'dataset': dataset.get('name', ''),
-                        'dataset_title': dataset.get('title', ''),
-                        'entity_type': ftm_entity.get('schema', ''),
-                        'entity_id': ftm_entity.get('id', ''),
-                        'alias': aliases,
-                        'country': '; '.join(properties.get('country', [])),
-                        'birth_date': '; '.join(properties.get('birthDate', [])),
-                        'nationality': '; '.join(properties.get('nationality', [])),
-                        'position': '; '.join(properties.get('position', [])),
-                        'registration_number': '; '.join(properties.get('registrationNumber', [])),
-                        'topics': '; '.join(properties.get('topics', [])),
-                        'sanction_program': '; '.join(properties.get('program', [])),
-                        'description': '; '.join(properties.get('description', [])),
-                        'last_updated': dataset.get('updated_at', ''),
-                        'source_url': '; '.join(properties.get('sourceUrl', [])),
-                        'legal_form': '; '.join(properties.get('legalForm', [])),
-                        'incorporation_date': '; '.join(properties.get('incorporationDate', [])),
-                        'address': '; '.join(properties.get('address', [])),
-                        'phone': '; '.join(properties.get('phone', [])),
-                        'email': '; '.join(properties.get('email', [])),
-                        'website': '; '.join(properties.get('website', []))
-                    }
-
-                    if entity['name']:
+                    entity = self._create_entity_from_ftm_json(
+                        ftm_entity, dataset)
+                    if entity.get('name'):
                         entities.append(entity)
 
                 except json.JSONDecodeError:
@@ -777,6 +928,96 @@ class OpenSanctionsExtractor:
                 f"No suitable resource found for dataset {dataset_name}")
             return []
 
+    def _create_entity_from_ftm_json(self, ftm_entity: Dict, dataset: Dict) -> Dict:
+        """Create entity dict from FTM JSON using actual available properties"""
+        entity = {}
+
+        # Always include core metadata
+        entity['source'] = 'opensanctions'
+        entity['dataset'] = dataset.get('name', '')
+        entity['dataset_title'] = dataset.get('title', '')
+        entity['last_updated'] = dataset.get('updated_at', '')
+        entity['entity_id'] = ftm_entity.get('id', '')
+        entity['entity_type'] = ftm_entity.get('schema', '')
+
+        # Process all available properties
+        properties = ftm_entity.get('properties', {})
+        for prop_name, prop_values in properties.items():
+            if prop_values:  # Only non-empty values
+                # Join multiple values with semicolon
+                if isinstance(prop_values, list):
+                    clean_value = '; '.join(str(v).strip()
+                                            for v in prop_values if str(v).strip())
+                else:
+                    clean_value = str(prop_values).strip()
+
+                if clean_value:
+                    # Normalize the property name (including ID mapping)
+                    clean_key = self._normalize_column_name(prop_name)
+                    entity[clean_key] = clean_value
+
+        # Track all columns we've seen
+        self.csv_columns.update(entity.keys())  # type: ignore
+
+        return entity
+
+    def _create_entity_from_csv_row(self, row: Dict, dataset: Dict) -> Dict:
+        """Create entity dict from CSV row using actual available columns"""
+        entity = {}
+
+        # Always include core metadata
+        entity['source'] = 'opensanctions'
+        entity['dataset'] = dataset.get('name', '')
+        entity['dataset_title'] = dataset.get('title', '')
+        entity['last_updated'] = dataset.get('updated_at', '')
+
+        # Add all available columns from the CSV row with ID normalization
+        for key, value in row.items():
+            if key and value and str(value).strip():  # Only non-empty values
+                # Normalize the column name (including ID mapping)
+                clean_key = self._normalize_column_name(key)
+                entity[clean_key] = str(value).strip()
+
+        # Track all columns we've seen
+        self.csv_columns.update(entity.keys())  # type: ignore
+
+        return entity
+
+    def analyze_and_finalize_schema(self):
+        """Analyze collected data and finalize the CSV schema"""
+        logger.info(
+            f"Analyzing schema from {len(self.all_entities)} entities...")
+
+        # Count column usage to prioritize common columns
+        column_counts = {}
+        for entity in self.all_entities:
+            for column in entity.keys():
+                column_counts[column] = column_counts.get(column, 0) + 1
+
+        # Sort columns by usage frequency and importance
+        core_columns = ['source', 'dataset', 'dataset_title',
+                        'name', 'entity_id', 'entity_type']
+        other_columns = [col for col in column_counts.keys()
+                         if col not in core_columns]
+        other_columns.sort(key=lambda x: column_counts[x], reverse=True)
+
+        # Final column order: core columns first, then others by frequency
+        self.csv_columns = []
+        for col in core_columns:
+            if col in column_counts:
+                self.csv_columns.append(col)
+
+        self.csv_columns.extend(other_columns)
+
+        logger.info(f"Finalized schema with {len(self.csv_columns)} columns:")
+        for i, col in enumerate(self.csv_columns[:10]):  # Show first 10
+            count = column_counts.get(col, 0)
+            logger.info(
+                f"  {i+1}. {col}: {count:,} entities ({count/len(self.all_entities)*100:.1f}%)")
+
+        if len(self.csv_columns) > 10:
+            logger.info(f"  ... and {len(self.csv_columns) - 10} more columns")
+
     def save_to_csv(self, all_entities: List[Dict]):
         """Save all entities to CSV file with dynamic schema"""
         # First, analyze the data to determine the best schema
@@ -805,7 +1046,6 @@ class OpenSanctionsExtractor:
         except Exception as e:
             logger.error(f"Failed to save CSV: {e}")
             raise
-
 
     def run_extraction(self, mode: str, specific_datasets: Optional[List[str]] = None, max_datasets: Optional[int] = None):
         """Main extraction process"""
@@ -865,274 +1105,49 @@ class OpenSanctionsExtractor:
         else:
             logger.warning("No entities extracted!")
 
-    def _fallback_curl_request(self, url: str, output_file: Optional[str] = None) -> Optional[str]:
-        """Fallback method using curl when Python requests fail due to SSL issues"""
-        try:
-            import subprocess
-            import tempfile
-            import os
-
-            logger.info(
-                f"Attempting to download {url} using curl as fallback...")
-
-            if output_file is None:
-                # Determine appropriate file extension from URL
-                url_lower = url.lower()
-                if '.zip' in url_lower:
-                    output_file = tempfile.mktemp(suffix='.zip')
-                elif '.gz' in url_lower:
-                    output_file = tempfile.mktemp(suffix='.gz')
-                elif '.bz2' in url_lower:
-                    output_file = tempfile.mktemp(suffix='.bz2')
-                else:
-                    output_file = tempfile.mktemp(suffix='.csv')
-
-            # Check if curl is available
-            if not shutil.which('curl'):
-                logger.warning("Curl is not available on this system")
-                return None
-
-            # Use curl with SSL options that are more permissive
-            curl_cmd = [
-                'curl',
-                '-L',  # Follow redirects
-                '--retry', '3',  # Retry on failure
-                '--retry-delay', '2',  # Delay between retries
-                '--connect-timeout', '30',  # Connection timeout
-                '--max-time', '300',  # Max total time
-                '--insecure',  # Ignore SSL certificate errors
-                '--tlsv1.2',  # Use TLS 1.2
-                '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-                '--progress-bar',  # Show progress
-                '--compressed',  # Handle compressed responses
-                '-o', output_file,  # Output to file
-                url
-            ]
-
-            result = subprocess.run(
-                curl_cmd, capture_output=False, text=True, timeout=320)
-
-            if result.returncode == 0 and os.path.exists(output_file):
-                file_size = os.path.getsize(output_file)
-                logger.info(
-                    f"Successfully downloaded using curl ({file_size:,} bytes)")
-                return output_file
-            else:
-                logger.error(
-                    f"Curl failed with return code {result.returncode}")
-                return None
-
-        except subprocess.TimeoutExpired:  # type: ignore
-            logger.error("Curl command timed out")
-            return None
-        except Exception as e:
-            logger.error(f"Fallback curl method failed: {e}")
-            return None
-
-    def _make_request_with_fallback(self, url: str, timeout: int = 60, max_retries: int = 3, stream: bool = False):
-        """Make HTTP request with curl fallback for SSL issues"""
-        try:
-            # First try the normal request method
-            return self._make_request(url, timeout, max_retries, stream)
-        except requests.exceptions.SSLError as e:
-            logger.warning(
-                f"All Python request methods failed with SSL error: {e}")
-            logger.info("Attempting curl fallback...")
-
-            # Try curl fallback
-            temp_file = self._fallback_curl_request(url)
-            if temp_file:
-                # Create a mock response object
-                class MockResponse:
-                    def __init__(self, file_path):
-                        self.file_path = file_path
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            self.text = f.read()
-                        self.status_code = 200
-
-                    def json(self):
-                        import json
-                        return json.loads(self.text)
-
-                    def raise_for_status(self):
-                        pass
-
-                    def iter_lines(self, decode_unicode=True):
-                        return self.text.splitlines()
-
-                return MockResponse(temp_file)
-            else:
-                raise e
-        except Exception as e:
-            # For non-SSL errors, just re-raise
-            raise e
-
-    def _extract_if_compressed(self, file_path: str) -> Optional[str]:
-        """Extract compressed files and return path to extracted CSV"""
-        import os
-        import tempfile
-        import zipfile
-        import gzip
-        import bz2
-
-        try:
-            file_lower = file_path.lower()
-
-            # Handle ZIP files
-            if file_lower.endswith('.zip'):
-                logger.info("Extracting ZIP archive...")
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    # Look for CSV files in the archive
-                    csv_files = [f for f in zip_ref.namelist(
-                    ) if f.lower().endswith('.csv')]
-                    if not csv_files:
-                        logger.warning("No CSV files found in ZIP archive")
-                        return None
-
-                    # Extract the first CSV file (or largest if multiple)
-                    target_file = csv_files[0]
-                    if len(csv_files) > 1:
-                        # Choose the largest CSV file
-                        file_sizes = [(f, zip_ref.getinfo(f).file_size)
-                                      for f in csv_files]
-                        target_file = max(file_sizes, key=lambda x: x[1])[0]
-                        logger.info(
-                            f"Multiple CSV files found, extracting largest: {target_file}")
-
-                    # Extract to temporary location
-                    extracted_path = tempfile.mktemp(suffix='.csv')
-                    with zip_ref.open(target_file) as source, open(extracted_path, 'wb') as target:
-                        shutil.copyfileobj(source, target)
-
-                    logger.info(
-                        f"Successfully extracted {target_file} from ZIP")
-                    return extracted_path
-
-            # Handle GZIP files
-            elif file_lower.endswith('.gz'):
-                logger.info("Extracting GZIP archive...")
-                extracted_path = tempfile.mktemp(suffix='.csv')
-                with gzip.open(file_path, 'rb') as gz_file:
-                    with open(extracted_path, 'wb') as out_file:
-                        shutil.copyfileobj(gz_file, out_file)
-                logger.info("Successfully extracted GZIP file")
-                return extracted_path
-
-            # Handle BZIP2 files
-            elif file_lower.endswith('.bz2'):
-                logger.info("Extracting BZIP2 archive...")
-                extracted_path = tempfile.mktemp(suffix='.csv')
-                with bz2.open(file_path, 'rb') as bz2_file:
-                    with open(extracted_path, 'wb') as out_file:
-                        shutil.copyfileobj(bz2_file, out_file)
-                logger.info("Successfully extracted BZIP2 file")
-                return extracted_path
-
-            # Not a compressed file, return as-is
-            else:
-                return None
-
-        except Exception as e:
-            logger.error(f"Failed to extract compressed file {file_path}: {e}")
-            return None
-
-    def _create_entity_from_ftm_json(self, ftm_entity: Dict, dataset: Dict) -> Dict:
-        """Create entity dict from FTM JSON using actual available properties"""
-        entity = {}
-
-        # Always include core metadata
-        entity['source'] = 'opensanctions'
-        entity['dataset'] = dataset.get('name', '')
-        entity['dataset_title'] = dataset.get('title', '')
-        entity['last_updated'] = dataset.get('updated_at', '')
-        entity['entity_id'] = ftm_entity.get('id', '')
-        entity['entity_type'] = ftm_entity.get('schema', '')
-
-        # Process all available properties
-        properties = ftm_entity.get('properties', {})
-        for prop_name, prop_values in properties.items():
-            if prop_values:  # Only non-empty values
-                # Join multiple values with semicolon
-                if isinstance(prop_values, list):
-                    clean_value = '; '.join(str(v).strip()
-                                            for v in prop_values if str(v).strip())
-                else:
-                    clean_value = str(prop_values).strip()
-
-                if clean_value:
-                    # Clean the property name
-                    clean_key = prop_name.strip().lower().replace(' ', '_').replace('-', '_')
-                    entity[clean_key] = clean_value
-
-        # Track all columns we've seen
-        self.csv_columns.update(entity.keys()) # type: ignore
-
-        return entity
-
-    def analyze_and_finalize_schema(self):
-        """Analyze collected data and finalize the CSV schema"""
-        logger.info(
-            f"Analyzing schema from {len(self.all_entities)} entities...")
-
-        # Count column usage to prioritize common columns
-        column_counts = {}
-        for entity in self.all_entities:
-            for column in entity.keys():
-                column_counts[column] = column_counts.get(column, 0) + 1
-
-        # Sort columns by usage frequency and importance
-        core_columns = ['source', 'dataset', 'dataset_title',
-                        'name', 'entity_id', 'entity_type']
-        other_columns = [col for col in column_counts.keys()
-                         if col not in core_columns]
-        other_columns.sort(key=lambda x: column_counts[x], reverse=True)
-
-        # Final column order: core columns first, then others by frequency
-        self.csv_columns = []
-        for col in core_columns:
-            if col in column_counts:
-                self.csv_columns.append(col)
-
-        self.csv_columns.extend(other_columns)
-
-        logger.info(f"Finalized schema with {len(self.csv_columns)} columns:")
-        for i, col in enumerate(self.csv_columns[:10]):  # Show first 10
-            count = column_counts.get(col, 0)
-            logger.info(
-                f"  {i+1}. {col}: {count:,} entities ({count/len(self.all_entities)*100:.1f}%)")
-
-        if len(self.csv_columns) > 10:
-            logger.info(f"  ... and {len(self.csv_columns) - 10} more columns")
-
 
 def main():
+    """Main function"""
     parser = argparse.ArgumentParser(
-        description='Extract entities from OpenSanctions datasets')
+        description="Extract entities from OpenSanctions datasets")
     parser.add_argument('--mode', choices=['all', 'specific', 'consolidated'], required=True,
-                        help='Extraction mode: all datasets, specific datasets, or consolidated data')
+                        help="Extraction mode: 'all' for all datasets, 'specific' for selected datasets, 'consolidated' for the unified dataset")
     parser.add_argument('--datasets', type=str,
-                        help='Comma-separated list of dataset names (for specific mode)')
+                        help="Comma-separated list of dataset names (for 'specific' mode)")
     parser.add_argument('--output', type=str, default='opensanctions_entities.csv',
-                        help='Output CSV filename')
+                        help="Output CSV file name")
     parser.add_argument('--max-datasets', type=int,
-                        help='Maximum number of datasets to process (for testing)')
+                        help="Maximum number of datasets to process (for testing)")
 
     args = parser.parse_args()
 
-    # Parse specific datasets if provided
+    # Validate arguments
+    if args.mode == 'specific' and not args.datasets:
+        logger.error(
+            "--datasets argument is required when using 'specific' mode")
+        sys.exit(1)
+
+    # Parse dataset names
     specific_datasets = None
     if args.datasets:
         specific_datasets = [name.strip() for name in args.datasets.split(',')]
 
-    # Validate arguments
-    if args.mode == 'specific' and not specific_datasets:
-        parser.error('--datasets is required when using specific mode')
-
     # Create extractor and run
     extractor = OpenSanctionsExtractor(output_file=args.output)
-    extractor.run_extraction(args.mode, specific_datasets,  # type: ignore
-                             args.max_datasets)  # type: ignore
+
+    try:
+        extractor.run_extraction(
+            mode=args.mode,
+            specific_datasets=specific_datasets,
+            max_datasets=args.max_datasets
+        )
+    except KeyboardInterrupt:
+        logger.info("Extraction interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Extraction failed: {e}")
+        sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
